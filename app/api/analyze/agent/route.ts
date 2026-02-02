@@ -11,6 +11,7 @@ import { runLLMWithFallback } from "@/lib/llm";
 import { normalizeSkills } from "@/lib/skillGraph/normalizeSkills";
 import { inferSkillsFromGraph } from "@/lib/skillGraph/inferSkillsFromGraph";
 import { mergeExplicitAndInferredSkills } from "@/lib/skillGraph/mergeSkills";
+import { applyEvidenceToInferredSkills } from "@/lib/skillGraph/applyEvidence"
 
 
 const corsHeaders = {
@@ -70,9 +71,14 @@ export async function POST(req: Request) {
 
     const inferredSkillsMap = inferSkillsFromGraph(explicitSkillIds);
 
+    const adjustedInferredSkills = applyEvidenceToInferredSkills(
+      inferredSkillsMap,
+      resume.experience || []
+    );
+
     const enrichedSkills = mergeExplicitAndInferredSkills(
       explicitSkillIds,
-      inferredSkillsMap
+      adjustedInferredSkills
     );
 
     const skillsForScoring = enrichedSkills.map(s => s.skill);
