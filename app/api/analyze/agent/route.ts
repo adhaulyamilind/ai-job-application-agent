@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+
 import { embedText } from "@/lib/embeddings";
 import { cosineSimilarity } from "@/lib/similarity";
 import { scoreDeterministic } from "@/lib/scoring";
@@ -8,13 +9,17 @@ import { inferSkillsFromResume } from "@/lib/inferSkills";
 import { getDecisionExplanation } from "@/lib/decisionExplain";
 import { runLLMWithFallback } from "@/lib/llm";
 
+/* ===== Skill Graph ===== */
 import { normalizeSkills } from "@/lib/skillGraph/normalizeSkills";
 import { inferSkillsFromGraph } from "@/lib/skillGraph/inferSkillsFromGraph";
-import { mergeExplicitAndInferredSkills, skillsToConfidenceMap } from "@/lib/skillGraph/mergeSkills";
+import {
+  mergeExplicitAndInferredSkills,
+  skillsToConfidenceMap
+} from "@/lib/skillGraph/mergeSkills";
 import { applyEvidenceToInferredSkills } from "@/lib/skillGraph/applyEvidence";
 import { applyRecencyDecay } from "@/lib/skillGraph/applyRecencyDecay";
 
-/* ---------------- CORS ---------------- */
+/* ===== CORS ===== */
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -26,17 +31,17 @@ export async function OPTIONS() {
   return new Response(null, { status: 204, headers: corsHeaders });
 }
 
-/* ---------------- TYPES ---------------- */
+/* ===== Types ===== */
 
 type Decision = "APPLY" | "REVIEW" | "SKIP";
 
-/* ---------------- ROUTE ---------------- */
+/* ===== Route ===== */
 
 export async function POST(req: Request) {
   try {
     const { model, resume, jd } = await req.json();
 
-    /* -------- AUTH -------- */
+    /* ---------- AUTH ---------- */
     const API_KEY = process.env.AGENT_API_KEY;
     const key = req.headers.get("x-api-key");
 
@@ -54,7 +59,7 @@ export async function POST(req: Request) {
       );
     }
 
-    /* -------- MODEL RESOLUTION -------- */
+    /* ---------- MODEL ---------- */
     const selectedModel =
       typeof model === "string"
         ? model
@@ -70,45 +75,45 @@ export async function POST(req: Request) {
     let modelInfo = resolved.modelInfo;
 
     /* =====================================================
-       B1 — SKILL GRAPH PIPELINE
+       B1 — SKILL GRAPH
     ===================================================== */
 
-    // 1️⃣ Normalize explicit skills (STRINGS → IDs)
+    // Explicit skills → IDs
     const explicitSkillIds = normalizeSkills(resume.skills);
 
-    // 2️⃣ Infer related skills from graph
-    const inferredSkillsMap = inferSkillsFromGraph(explicitSkillIds);
+    // Infer neighbors
+    const inferredSkillMap = inferSkillsFromGraph(explicitSkillIds);
 
-    // 3️⃣ Boost confidence if resume text supports it
+    // Evidence boost
     const evidenceAdjusted = applyEvidenceToInferredSkills(
-      inferredSkillsMap,
+      inferredSkillMap,
       resume.experience || []
     );
 
-    // 4️⃣ Apply recency decay
+    // Recency decay
     const recencyAdjusted = applyRecencyDecay(
       evidenceAdjusted,
       resume.experience || []
     );
 
-    // 5️⃣ Merge explicit (confidence = 1) + inferred
+    // Merge explicit + inferred
     const enrichedSkills = mergeExplicitAndInferredSkills(
       explicitSkillIds,
       recencyAdjusted
     );
-    // enrichedSkills: { skill: string; confidence: number }[]
+    // -> { skill: string; confidence: number }[]
 
     /* =====================================================
-       DETERMINISTIC SCORING (CONFIDENCE-AWARE)
+       DETERMINISTIC SCORING
     ===================================================== */
 
-    const normalizedJDRequiredSkills = normalizeSkills(jd.requiredSkills);
-    const normalizedJDPreferredSkills = normalizeSkills(jd.preferredSkills || []);
+    const normalizedJDRequired = normalizeSkills(jd.requiredSkills);
+    const normalizedJDPreferred = normalizeSkills(jd.preferredSkills || []);
 
     const deterministic = scoreDeterministic(
       enrichedSkills,
-      normalizedJDRequiredSkills,
-      normalizedJDPreferredSkills
+      normalizedJDRequired,
+      normalizedJDPreferred
     );
 
     /* =====================================================
@@ -144,28 +149,28 @@ export async function POST(req: Request) {
     }
 
     /* =====================================================
-       SEMANTIC SCORING (UNCHANGED)
+       SEMANTIC SCORING
     ===================================================== */
 
-    const resumeSkillsText = `
+    const resumeText = `
 Frontend skills and experience:
 ${resume.skills.join(", ")}
     `;
 
-    const jdSkillsText = `
-Required frontend skills for this role:
+    const jdText = `
+Required skills:
 ${jd.requiredSkills.join(", ")}
     `;
 
-    const resumeEmbedding = await embedText(resumeSkillsText);
-    const jdEmbedding = await embedText(jdSkillsText);
+    const resumeEmbedding = await embedText(resumeText);
+    const jdEmbedding = await embedText(jdText);
 
     const semanticSkillsScore = Math.round(
       cosineSimilarity(resumeEmbedding, jdEmbedding) * 100
     );
 
     /* =====================================================
-       FINAL SCORE + DECISION
+       INITIAL DECISION
     ===================================================== */
 
     let finalScore = Math.round(
@@ -175,7 +180,7 @@ ${jd.requiredSkills.join(", ")}
 
     let decision: Decision;
 
-    if (finalScore >= 70) {
+    if (finalScore >= 81) {
       decision = "APPLY";
     } else if (semanticSkillsScore >= 70 && deterministic.score >= 20) {
       decision = "REVIEW";
@@ -183,15 +188,21 @@ ${jd.requiredSkills.join(", ")}
       decision = "SKIP";
     }
 
+    const decisionTrace: any = {
+      initial: {
+        decision,
+        finalScore
+      },
+      postRewrite: null
+    };
+
     /* =====================================================
-       AGENT ACTIONS
+       REVIEW FLOW
     ===================================================== */
 
-    let coverLetter: string | null = null;
     let improvedResume: string[] | null = null;
     let improvedDeterministicScore: number | null = null;
 
-    /* -------- REVIEW FLOW -------- */
     if (decision === "REVIEW") {
       improvedResume = await rewriteResumeBullets({
         experience: resume.experience || [],
@@ -199,28 +210,27 @@ ${jd.requiredSkills.join(", ")}
       });
 
       if (improvedResume.length > 0) {
-        // ⚠️ inferSkillsFromResume expects RAW STRINGS
         const inferredFromRewrite = inferSkillsFromResume(
           improvedResume,
           jd.requiredSkills
         );
 
-        const rewrittenSkillIds = normalizeSkills(inferredFromRewrite);
+        const rewrittenIds = normalizeSkills(inferredFromRewrite);
 
-        const rewrittenSkillMap = skillsToConfidenceMap(
-          rewrittenSkillIds,
-          0.9 // rewritten evidence is strong but not explicit
+        const rewrittenMap = skillsToConfidenceMap(
+          rewrittenIds,
+          0.9
         );
-        
+
         const rewrittenMerged = mergeExplicitAndInferredSkills(
           explicitSkillIds,
-          rewrittenSkillMap
+          rewrittenMap
         );
-        
+
         const improvedScore = scoreDeterministic(
           rewrittenMerged,
-          normalizedJDRequiredSkills,
-          normalizedJDPreferredSkills
+          normalizedJDRequired,
+          normalizedJDPreferred
         );
 
         improvedDeterministicScore = improvedScore.score;
@@ -230,6 +240,11 @@ ${jd.requiredSkills.join(", ")}
           semanticSkillsScore * 0.4
         );
 
+        decisionTrace.postRewrite = {
+          decision: improvedFinal >= 70 ? "APPLY" : "REVIEW",
+          finalScore: improvedFinal
+        };
+
         if (improvedFinal >= 70) {
           decision = "APPLY";
           finalScore = improvedFinal;
@@ -237,7 +252,12 @@ ${jd.requiredSkills.join(", ")}
       }
     }
 
-    /* -------- APPLY FLOW -------- */
+    /* =====================================================
+       APPLY FLOW
+    ===================================================== */
+
+    let coverLetter: string | null = null;
+
     if (decision === "APPLY") {
       const prompt = `
 Write a concise professional cover letter.
@@ -280,8 +300,10 @@ Rules:
     return NextResponse.json({
       modelInfo,
       decision,
+      decisionTrace,
       decisionReason,
       actionHint,
+      debugSkillGraph: enrichedSkills,
       scores: {
         deterministic: deterministic.score,
         semanticSkills: semanticSkillsScore,
