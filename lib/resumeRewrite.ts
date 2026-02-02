@@ -46,8 +46,16 @@ Return ONLY a JSON array of STRINGS.
   let parsed: unknown;
 
   try {
-    const response = await runLLMWithFallback(prompt);
-    parsed = JSON.parse(response);
+    const response = await runLLMWithFallback({
+      preferredModel: "qwen2.5:7b-instruct",
+      prompt
+    });
+    
+    if (!response.output) {
+      throw new Error("LLM returned empty output");
+    }
+    
+    parsed = JSON.parse(response.output);
   } catch {
     return [];
   }
