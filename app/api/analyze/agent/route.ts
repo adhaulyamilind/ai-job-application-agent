@@ -10,7 +10,7 @@ import { runLLMWithFallback } from "@/lib/llm";
 
 import { normalizeSkills } from "@/lib/skillGraph/normalizeSkills";
 import { inferSkillsFromGraph } from "@/lib/skillGraph/inferSkillsFromGraph";
-import { mergeExplicitAndInferredSkills } from "@/lib/skillGraph/mergeSkills";
+import { mergeExplicitAndInferredSkills, skillsToConfidenceMap } from "@/lib/skillGraph/mergeSkills";
 import { applyEvidenceToInferredSkills } from "@/lib/skillGraph/applyEvidence";
 import { applyRecencyDecay } from "@/lib/skillGraph/applyRecencyDecay";
 
@@ -207,11 +207,16 @@ ${jd.requiredSkills.join(", ")}
 
         const rewrittenSkillIds = normalizeSkills(inferredFromRewrite);
 
+        const rewrittenSkillMap = skillsToConfidenceMap(
+          rewrittenSkillIds,
+          0.9 // rewritten evidence is strong but not explicit
+        );
+        
         const rewrittenMerged = mergeExplicitAndInferredSkills(
           explicitSkillIds,
-          rewrittenSkillIds
+          rewrittenSkillMap
         );
-
+        
         const improvedScore = scoreDeterministic(
           rewrittenMerged,
           normalizedJDRequiredSkills,
