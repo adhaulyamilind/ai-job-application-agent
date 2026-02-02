@@ -8,6 +8,11 @@ import { inferSkillsFromResume } from "@/lib/inferSkills";
 import { getDecisionExplanation } from "@/lib/decisionExplain";
 import { runLLMWithFallback } from "@/lib/llm";
 
+import { normalizeSkills } from "@/lib/skillGraph/normalizeSkills";
+import { inferSkillsFromGraph } from "@/lib/skillGraph/inferSkillsFromGraph";
+import { mergeExplicitAndInferredSkills } from "@/lib/skillGraph/mergeSkills";
+
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*", // allow browser + cloudflare + vercel
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -61,14 +66,26 @@ export async function POST(req: Request) {
       );
     }
 
-    /* --------------------------------------------------
-       1️⃣ Deterministic (ATS-style keyword scoring)
-    -------------------------------------------------- */
-    const deterministic = scoreDeterministic(
-      resume.skills,
-      jd.requiredSkills,
-      jd.preferredSkills || []
+    const explicitSkillIds = normalizeSkills(resume.skills);
+
+    const inferredSkillsMap = inferSkillsFromGraph(explicitSkillIds);
+
+    const enrichedSkills = mergeExplicitAndInferredSkills(
+      explicitSkillIds,
+      inferredSkillsMap
     );
+
+    const skillsForScoring = enrichedSkills.map(s => s.skill);
+
+    const normalizedJDRequiredSkills = normalizeSkills(jd.requiredSkills);
+    const normalizedJDPreferredSkills = normalizeSkills(jd.preferredSkills || []);
+
+    const deterministic = scoreDeterministic(
+      skillsForScoring,
+      normalizedJDRequiredSkills,
+      normalizedJDPreferredSkills
+    );
+
 
     /* --------------------------------------------------
        2️⃣ Semantic Scoring (SKILLS ONLY)
