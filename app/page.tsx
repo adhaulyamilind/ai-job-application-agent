@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { analyzeWithAgent } from "@/lib/services/agent.service";
 
 export default function Page() {
   const [model, setModel] = useState(
@@ -19,25 +20,48 @@ export default function Page() {
 
   async function runAgent() {
     setLoading(true);
+    setLoading(true);
 
-    const res = await fetch("/api/analyze/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    try {
+      const data = await analyzeWithAgent({
         model,
         resume: {
           skills: skills.split(",").map(s => s.trim()),
-          experience: experience.split("\n").map(e => e.trim())
+          experience: experience
+            .split("\n")
+            .map(e => e.trim())
         },
         jd: {
-          requiredSkills: jdSkills.split(",").map(s => s.trim())
+          requiredSkills: jdSkills
+            .split(",")
+            .map(s => s.trim())
         }
-      })
-    });
+      });
+  
+      setResult(data);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setLoading(false);
+    }
+    // const res = await fetch("/api/analyze/agent", {
+    //   method: "POST",
+    //   headers: { "Content-Type": "application/json" },
+    //   body: JSON.stringify({
+    //     model,
+    //     resume: {
+    //       skills: skills.split(",").map(s => s.trim()),
+    //       experience: experience.split("\n").map(e => e.trim())
+    //     },
+    //     jd: {
+    //       requiredSkills: jdSkills.split(",").map(s => s.trim())
+    //     }
+    //   })
+    // });
 
-    const data = await res.json();
-    setResult(data);
-    setLoading(false);
+    // const data = await res.json();
+    // setResult(data);
+    // setLoading(false);
   }
 
   return (
