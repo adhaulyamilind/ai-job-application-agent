@@ -73,29 +73,30 @@ export async function POST(req: Request) {
        B1 — SKILL GRAPH PIPELINE
     ===================================================== */
 
-    // B1.0 — normalize explicit skills
+    // 1️⃣ Normalize explicit skills (STRINGS → IDs)
     const explicitSkillIds = normalizeSkills(resume.skills);
 
-    // B1.1 — infer from graph
+    // 2️⃣ Infer related skills from graph
     const inferredSkillsMap = inferSkillsFromGraph(explicitSkillIds);
 
-    // B1.2 — evidence boost
+    // 3️⃣ Boost confidence if resume text supports it
     const evidenceAdjusted = applyEvidenceToInferredSkills(
       inferredSkillsMap,
       resume.experience || []
     );
 
-    // B1.3 — recency decay
+    // 4️⃣ Apply recency decay
     const recencyAdjusted = applyRecencyDecay(
       evidenceAdjusted,
       resume.experience || []
     );
 
-    // Merge explicit + inferred (explicit always confidence = 1)
+    // 5️⃣ Merge explicit (confidence = 1) + inferred
     const enrichedSkills = mergeExplicitAndInferredSkills(
       explicitSkillIds,
       recencyAdjusted
     );
+    // enrichedSkills: { skill: string; confidence: number }[]
 
     /* =====================================================
        DETERMINISTIC SCORING (CONFIDENCE-AWARE)
@@ -143,17 +144,17 @@ export async function POST(req: Request) {
     }
 
     /* =====================================================
-       SEMANTIC SCORING
+       SEMANTIC SCORING (UNCHANGED)
     ===================================================== */
 
     const resumeSkillsText = `
-      Frontend skills and experience:
-      ${resume.skills.join(", ")}
+Frontend skills and experience:
+${resume.skills.join(", ")}
     `;
 
     const jdSkillsText = `
-      Required frontend skills for this role:
-      ${jd.requiredSkills.join(", ")}
+Required frontend skills for this role:
+${jd.requiredSkills.join(", ")}
     `;
 
     const resumeEmbedding = await embedText(resumeSkillsText);
@@ -190,7 +191,7 @@ export async function POST(req: Request) {
     let improvedResume: string[] | null = null;
     let improvedDeterministicScore: number | null = null;
 
-    /* -------- REVIEW -------- */
+    /* -------- REVIEW FLOW -------- */
     if (decision === "REVIEW") {
       improvedResume = await rewriteResumeBullets({
         experience: resume.experience || [],
@@ -198,18 +199,21 @@ export async function POST(req: Request) {
       });
 
       if (improvedResume.length > 0) {
+        // ⚠️ inferSkillsFromResume expects RAW STRINGS
         const inferredFromRewrite = inferSkillsFromResume(
           improvedResume,
-          normalizedJDRequiredSkills
+          jd.requiredSkills
         );
 
-        const mergedSkills = mergeExplicitAndInferredSkills(
+        const rewrittenSkillIds = normalizeSkills(inferredFromRewrite);
+
+        const rewrittenMerged = mergeExplicitAndInferredSkills(
           explicitSkillIds,
-          inferredFromRewrite
+          rewrittenSkillIds
         );
 
         const improvedScore = scoreDeterministic(
-          mergedSkills,
+          rewrittenMerged,
           normalizedJDRequiredSkills,
           normalizedJDPreferredSkills
         );
@@ -228,7 +232,7 @@ export async function POST(req: Request) {
       }
     }
 
-    /* -------- APPLY -------- */
+    /* -------- APPLY FLOW -------- */
     if (decision === "APPLY") {
       const prompt = `
 Write a concise professional cover letter.

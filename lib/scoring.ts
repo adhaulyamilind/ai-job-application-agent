@@ -1,5 +1,7 @@
-
-type SkillMatchType = "EXACT" | "PARTIAL" | "TOKEN" | "NONE";
+type SkillConfidence = {
+  skill: string;
+  confidence: number; // 0–1
+};
 
 function normalize(s: string): string {
   return s.toLowerCase().trim();
@@ -10,96 +12,59 @@ function tokenize(s: string): string[] {
 }
 
 function matchSkill(
-  resumeSkill: string,
+  resumeSkill: SkillConfidence,
   jdSkill: string
-): { type: SkillMatchType; weight: number } {
-  const r = normalize(resumeSkill);
-  const j = normalize(jdSkill);
+): number {
+  const resumeTokens = tokenize(resumeSkill.skill);
+  const jdTokens = tokenize(jdSkill);
 
-  // 1️⃣ Exact
-  if (r === j) {
-    return { type: "EXACT", weight: 1.0 };
-  }
+  const overlap = resumeTokens.filter(t =>
+    jdTokens.includes(t)
+  ).length;
 
-  // 2️⃣ Substring
-  if (r.includes(j) || j.includes(r)) {
-    return { type: "PARTIAL", weight: 0.7 };
-  }
+  if (overlap === 0) return 0;
 
-  // 3️⃣ Token overlap
-  const rTokens = tokenize(r);
-  const jTokens = tokenize(j);
-
-  const overlap = rTokens.filter(t => jTokens.includes(t));
-  if (overlap.length > 0) {
-    return { type: "TOKEN", weight: 0.4 };
-  }
-
-  return { type: "NONE", weight: 0 };
+  // confidence-weighted match
+  return (overlap / jdTokens.length) * resumeSkill.confidence;
 }
 
 export function scoreDeterministic(
-  resumeSkills: string[],
-  requiredSkills: string[],
-  preferredSkills: string[]
+  resumeSkills: SkillConfidence[],
+  required: string[],
+  preferred: string[] = []
 ) {
   let score = 0;
-  const skillMatches: {
-    required: string;
-    matchedWith: string;
-    type: SkillMatchType;
-    weight: number;
-  }[] = [];
+  const skillMatches: any[] = [];
+  const missingSkills: string[] = [];
 
-  requiredSkills.forEach(req => {
-    let bestMatch = { weight: 0, type: "NONE" as SkillMatchType, skill: "" };
+  required.forEach(req => {
+    let bestMatch = 0;
+    let matchedWith: string | null = null;
 
-    resumeSkills.forEach(rs => {
-      const result = matchSkill(rs, req);
-      if (result.weight > bestMatch.weight) {
-        bestMatch = { ...result, skill: rs };
+    resumeSkills.forEach(resumeSkill => {
+      const m = matchSkill(resumeSkill, req);
+      if (m > bestMatch) {
+        bestMatch = m;
+        matchedWith = resumeSkill.skill;
       }
     });
 
-    if (bestMatch.weight > 0) {
-      score += bestMatch.weight;
+    if (bestMatch > 0 && matchedWith) {
+      score += (100 / required.length) * bestMatch;
       skillMatches.push({
-        required: req,
-        matchedWith: bestMatch.skill,
-        type: bestMatch.type,
-        weight: bestMatch.weight
+        required: normalize(req),
+        matchedWith: normalize(matchedWith),
+        type: bestMatch === 1 ? "EXACT" : "INFERRED",
+        weight: bestMatch
       });
+    } else {
+      missingSkills.push(req);
     }
   });
 
-  // Normalize to 100
-  const normalizedScore = Math.round(
-    (score / requiredSkills.length) * 100
-  );
-
   return {
-    score: Math.min(100, normalizedScore),
+    score: Math.round(score),
     skillMatches,
-    missingSkills: requiredSkills.filter(
-      r => !skillMatches.some(m => m.required === r)
-    )
+    missingSkills
   };
 }
-
-function skillsMatch(resumeSkill: string, jdSkill: string): boolean {
-  const r = normalize(resumeSkill);
-  const j = normalize(jdSkill);
-
-  // 1️⃣ Exact normalized match
-  if (r === j) return true;
-
-  // 2️⃣ Substring match (bounded)
-  if (r.includes(j) || j.includes(r)) return true;
-
-  // 3️⃣ Token overlap (at least one shared keyword)
-  const rTokens = tokenize(r);
-  const jTokens = tokenize(j);
-
-  return rTokens.some(token => jTokens.includes(token));
-}
-
