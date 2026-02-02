@@ -8,6 +8,18 @@ import { inferSkillsFromResume } from "@/lib/inferSkills";
 import { getDecisionExplanation } from "@/lib/decisionExplain";
 import { runLLMWithFallback } from "@/lib/llm";
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*", // allow browser + cloudflare + vercel
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-api-key"
+};
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders
+  });
+}
 
 
 type Decision = "APPLY" | "REVIEW" | "SKIP";
@@ -28,7 +40,7 @@ export async function POST(req: Request) {
     if (!API_KEY || key !== API_KEY) {
       return NextResponse.json(
         { error: "Unauthorized" },
-        { status: 401 }
+        { status: 401, headers: corsHeaders }
       );
     }
 
@@ -45,7 +57,7 @@ export async function POST(req: Request) {
     if (!resume?.skills || !jd?.requiredSkills) {
       return NextResponse.json(
         { error: "Invalid input payload" },
-        { status: 400 }
+        { status: 400, headers: corsHeaders }
       );
     }
 
@@ -96,7 +108,7 @@ export async function POST(req: Request) {
         missingSkills: jd.requiredSkills,
         improvedResume: null,
         coverLetter: null
-      });
+      }, { headers: corsHeaders });
     }
     
 
@@ -244,13 +256,13 @@ export async function POST(req: Request) {
       missingSkills: deterministic.missingSkills,
       improvedResume,
       coverLetter
-    });
+    }, { headers: corsHeaders });
 
   } catch (err: any) {
     console.error("AGENT ERROR:", err);
     return NextResponse.json(
       { error: err.message || "Internal error" },
-      { status: 500 }
+      { status: 500, headers: corsHeaders }
     );
   }
 }
