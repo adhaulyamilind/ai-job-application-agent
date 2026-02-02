@@ -11,36 +11,33 @@ import { runLLMWithFallback } from "@/lib/llm";
 import { normalizeSkills } from "@/lib/skillGraph/normalizeSkills";
 import { inferSkillsFromGraph } from "@/lib/skillGraph/inferSkillsFromGraph";
 import { mergeExplicitAndInferredSkills } from "@/lib/skillGraph/mergeSkills";
-import { applyEvidenceToInferredSkills } from "@/lib/skillGraph/applyEvidence"
+import { applyEvidenceToInferredSkills } from "@/lib/skillGraph/applyEvidence";
+import { applyRecencyDecay } from "@/lib/skillGraph/applyRecencyDecay";
 
+/* ---------------- CORS ---------------- */
 
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*", // allow browser + cloudflare + vercel
+  "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, x-api-key"
 };
 
 export async function OPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders
-  });
+  return new Response(null, { status: 204, headers: corsHeaders });
 }
 
+/* ---------------- TYPES ---------------- */
 
 type Decision = "APPLY" | "REVIEW" | "SKIP";
+
+/* ---------------- ROUTE ---------------- */
 
 export async function POST(req: Request) {
   try {
     const { model, resume, jd } = await req.json();
-    const selectedModel =
-      typeof model === "string"
-        ? model
-        : "ollama:qwen2.5:7b-instruct"; // default fallback
 
-    const [provider, modelName] = selectedModel.split(/:(.+)/);
+    /* -------- AUTH -------- */
     const API_KEY = process.env.AGENT_API_KEY;
-
     const key = req.headers.get("x-api-key");
 
     if (!API_KEY || key !== API_KEY) {
@@ -50,16 +47,6 @@ export async function POST(req: Request) {
       );
     }
 
-    const resolved = await runLLMWithFallback({
-      // provider: provider as "ollama",
-      preferredModel: modelName,
-      dryRun: true
-    });
-    
-    let modelInfo = resolved.modelInfo;
-    
-    
-
     if (!resume?.skills || !jd?.requiredSkills) {
       return NextResponse.json(
         { error: "Invalid input payload" },
@@ -67,44 +54,65 @@ export async function POST(req: Request) {
       );
     }
 
+    /* -------- MODEL RESOLUTION -------- */
+    const selectedModel =
+      typeof model === "string"
+        ? model
+        : "ollama:qwen2.5:7b-instruct";
+
+    const [, modelName] = selectedModel.split(/:(.+)/);
+
+    const resolved = await runLLMWithFallback({
+      preferredModel: modelName,
+      dryRun: true
+    });
+
+    let modelInfo = resolved.modelInfo;
+
+    /* =====================================================
+       B1 — SKILL GRAPH PIPELINE
+    ===================================================== */
+
+    // B1.0 — normalize explicit skills
     const explicitSkillIds = normalizeSkills(resume.skills);
 
+    // B1.1 — infer from graph
     const inferredSkillsMap = inferSkillsFromGraph(explicitSkillIds);
 
-    const adjustedInferredSkills = applyEvidenceToInferredSkills(
+    // B1.2 — evidence boost
+    const evidenceAdjusted = applyEvidenceToInferredSkills(
       inferredSkillsMap,
       resume.experience || []
     );
 
-    const enrichedSkills = mergeExplicitAndInferredSkills(
-      explicitSkillIds,
-      adjustedInferredSkills
+    // B1.3 — recency decay
+    const recencyAdjusted = applyRecencyDecay(
+      evidenceAdjusted,
+      resume.experience || []
     );
 
-    const skillsForScoring = enrichedSkills.map(s => s.skill);
+    // Merge explicit + inferred (explicit always confidence = 1)
+    const enrichedSkills = mergeExplicitAndInferredSkills(
+      explicitSkillIds,
+      recencyAdjusted
+    );
+
+    /* =====================================================
+       DETERMINISTIC SCORING (CONFIDENCE-AWARE)
+    ===================================================== */
 
     const normalizedJDRequiredSkills = normalizeSkills(jd.requiredSkills);
     const normalizedJDPreferredSkills = normalizeSkills(jd.preferredSkills || []);
 
     const deterministic = scoreDeterministic(
-      skillsForScoring,
+      enrichedSkills,
       normalizedJDRequiredSkills,
       normalizedJDPreferredSkills
     );
 
-
-    /* --------------------------------------------------
-       2️⃣ Semantic Scoring (SKILLS ONLY)
-    -------------------------------------------------- */
-    const resumeSkillsText = `
-      Frontend skills and experience:
-      ${resume.skills.join(", ")}
-      `;
-
-    const jdSkillsText = `
-      Required frontend skills for this role:
-      ${jd.requiredSkills.join(", ")}
-    `;
+    /* =====================================================
+       DOMAIN GATE
+    ===================================================== */
 
     const isResumeTech = isTechDomain(resume.skills);
 
@@ -115,7 +123,7 @@ export async function POST(req: Request) {
           semantic: 0,
           missingSkills: jd.requiredSkills
         });
-    
+
       return NextResponse.json({
         modelInfo,
         decision: "SKIP",
@@ -133,7 +141,20 @@ export async function POST(req: Request) {
         coverLetter: null
       }, { headers: corsHeaders });
     }
-    
+
+    /* =====================================================
+       SEMANTIC SCORING
+    ===================================================== */
+
+    const resumeSkillsText = `
+      Frontend skills and experience:
+      ${resume.skills.join(", ")}
+    `;
+
+    const jdSkillsText = `
+      Required frontend skills for this role:
+      ${jd.requiredSkills.join(", ")}
+    `;
 
     const resumeEmbedding = await embedText(resumeSkillsText);
     const jdEmbedding = await embedText(jdSkillsText);
@@ -142,128 +163,111 @@ export async function POST(req: Request) {
       cosineSimilarity(resumeEmbedding, jdEmbedding) * 100
     );
 
-    /* --------------------------------------------------
-       3️⃣ Final Combined Score
-       (Explainable + Semantic)
-    -------------------------------------------------- */
+    /* =====================================================
+       FINAL SCORE + DECISION
+    ===================================================== */
+
     let finalScore = Math.round(
       deterministic.score * 0.6 +
       semanticSkillsScore * 0.4
     );
 
-    /* --------------------------------------------------
-       4️⃣ Decision Logic (Growth-Oriented)
-    -------------------------------------------------- */
     let decision: Decision;
 
-    
-    if (!isResumeTech) {
-      decision = "SKIP";
-    } else if (finalScore >= 70) {
+    if (finalScore >= 70) {
       decision = "APPLY";
-    } else if (
-      semanticSkillsScore >= 70 &&
-      deterministic.score >= 20
-    ) {
+    } else if (semanticSkillsScore >= 70 && deterministic.score >= 20) {
       decision = "REVIEW";
     } else {
       decision = "SKIP";
     }
-    
-    /* --------------------------------------------------
-       5️⃣ Agent Actions
-    -------------------------------------------------- */
+
+    /* =====================================================
+       AGENT ACTIONS
+    ===================================================== */
+
     let coverLetter: string | null = null;
     let improvedResume: string[] | null = null;
     let improvedDeterministicScore: number | null = null;
 
-
-    
-    /* -------- REVIEW FLOW -------- */
+    /* -------- REVIEW -------- */
     if (decision === "REVIEW") {
       improvedResume = await rewriteResumeBullets({
         experience: resume.experience || [],
         missingSkills: deterministic.missingSkills
       });
-    
+
       if (improvedResume.length > 0) {
-    
-        // 1️⃣ Infer skills from rewritten bullets
-        const inferredSkills = inferSkillsFromResume(
+        const inferredFromRewrite = inferSkillsFromResume(
           improvedResume,
-          jd.requiredSkills
+          normalizedJDRequiredSkills
         );
-    
-        // 2️⃣ Merge skills (no duplicates)
-        const combinedSkills = Array.from(
-          new Set([...resume.skills, ...inferredSkills])
+
+        const mergedSkills = mergeExplicitAndInferredSkills(
+          explicitSkillIds,
+          inferredFromRewrite
         );
-    
-        // 3️⃣ Re-score deterministically
+
         const improvedScore = scoreDeterministic(
-          combinedSkills,
-          jd.requiredSkills,
-          jd.preferredSkills || []
+          mergedSkills,
+          normalizedJDRequiredSkills,
+          normalizedJDPreferredSkills
         );
-    
+
         improvedDeterministicScore = improvedScore.score;
-    
-        // 4️⃣ Recompute final score
-        const improvedFinalScore = Math.round(
+
+        const improvedFinal = Math.round(
           improvedScore.score * 0.6 +
           semanticSkillsScore * 0.4
         );
-    
-        // 5️⃣ AUTO-FLIP TO APPLY
-        if (improvedFinalScore >= 70) {
+
+        if (improvedFinal >= 70) {
           decision = "APPLY";
-          finalScore = improvedFinalScore;
+          finalScore = improvedFinal;
         }
       }
     }
 
-    /* -------- APPLY FLOW -------- */    
-    if (decision === "APPLY" && !coverLetter) {
+    /* -------- APPLY -------- */
+    if (decision === "APPLY") {
       const prompt = `
-    Write a concise professional cover letter.
-    
-    Candidate:
-    Senior frontend engineer with over 5 years of experience.
-    
-    Skills:
-    ${resume.skills.join(", ")}
-    
-    Job requirements:
-    ${jd.requiredSkills.join(", ")}
-    
-    Rules:
-    - No placeholders
-    - Factual
-    - Senior, confident tone
-    - 3 short paragraphs
-    `;
-    
+Write a concise professional cover letter.
 
-    const llm = await runLLMWithFallback({
-      // provider: provider as "ollama",
-      preferredModel: modelInfo.model,
-      prompt
-    });
-        
-    coverLetter = llm.output;
-    modelInfo = llm.modelInfo;
+Candidate:
+Senior frontend engineer with over 5 years of experience.
+
+Skills:
+${resume.skills.join(", ")}
+
+Job requirements:
+${jd.requiredSkills.join(", ")}
+
+Rules:
+- No placeholders
+- Factual
+- Senior, confident tone
+- 3 short paragraphs
+      `;
+
+      const llm = await runLLMWithFallback({
+        preferredModel: modelInfo.model,
+        prompt
+      });
+
+      coverLetter = llm.output;
+      modelInfo = llm.modelInfo;
     }
-    
+
     const { decisionReason, actionHint } = getDecisionExplanation(decision, {
       deterministic: deterministic.score,
       semantic: semanticSkillsScore,
       missingSkills: deterministic.missingSkills
     });
 
+    /* =====================================================
+       RESPONSE
+    ===================================================== */
 
-    /* --------------------------------------------------
-       6️⃣ Final Response
-    -------------------------------------------------- */
     return NextResponse.json({
       modelInfo,
       decision,
