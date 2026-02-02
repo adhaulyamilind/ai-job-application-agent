@@ -21,6 +21,16 @@ export async function POST(req: Request) {
         : "ollama:qwen2.5:7b-instruct"; // default fallback
 
     const [provider, modelName] = selectedModel.split(/:(.+)/);
+    const API_KEY = process.env.AGENT_API_KEY;
+
+    const key = req.headers.get("x-api-key");
+
+    if (!API_KEY || key !== API_KEY) {
+      return NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
 
     const resolved = await runLLMWithFallback({
       // provider: provider as "ollama",
